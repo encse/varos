@@ -18,6 +18,10 @@ npm test
 npm run build
 ```
 
+## GitHub Pages
+
+A `.github/workflows/deploy.yml` minden `main` ágra küldött változást automatikusan publikál. A célcím a `varos.csokavar.hu`; a `public/CNAME` fájl a build részeként kerül ki. GitHubon a **Settings → Pages → Source** mezőben a **GitHub Actions** lehetőséget kell választani, majd a domain DNS-éhez a GitHub Pages által megadott CNAME rekordot beállítani.
+
 ## Használat
 
 - `Space`: indítás / szünet
