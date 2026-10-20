@@ -6,6 +6,7 @@ import { carPoseAt, LANE_INSET } from './motion'
 import { fitsInYard, planParks, sceneryHash, yardSpots, type ParkKind, type YardFootprint } from './scenery'
 import { Seagulls } from './seagulls'
 import { CAR_APPEARANCES } from './carAppearance'
+import { DioramaSky } from './sky'
 
 type Signal = { red: THREE.Mesh; green: THREE.Mesh; node: Kereszt; direction: number }
 type ParkProp = { template: THREE.Object3D; file: typeof PARK_PROP_FILES[number] }
@@ -67,6 +68,7 @@ const SOURCE_SCALE = {
 export class City3DRenderer {
   private readonly renderer: THREE.WebGLRenderer
   private readonly scene = new THREE.Scene()
+  private readonly sky = new DioramaSky()
   private readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 500)
   private readonly controls: OrbitControls
   private readonly staticGroup = new THREE.Group()
@@ -134,7 +136,7 @@ export class City3DRenderer {
     this.renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.scene.background = new THREE.Color('#171918')
-    this.scene.add(this.staticGroup, this.carGroup, this.seagulls.group)
+    this.scene.add(this.staticGroup, this.carGroup, this.seagulls.group, this.sky.mesh)
 
     const hemisphere = new THREE.HemisphereLight('#d8edf0', '#3e3025', 2.15)
     const sun = new THREE.DirectionalLight('#fff0c2', 3.5)
@@ -358,6 +360,15 @@ export class City3DRenderer {
       this.staticGroup.add(engraving)
     }
 
+    const signature = new THREE.Mesh(
+      new THREE.PlaneGeometry(4.2, 0.8),
+      this.engravedLabel('csokavar.hu', 4.2 / 0.8),
+    )
+    signature.rotation.x = -Math.PI / 2
+    signature.position.set(map.width / 2 - 0.25, -0.094, map.height / 2 + 1.87)
+    signature.receiveShadow = true
+    this.staticGroup.add(signature)
+
     const lowerBase = new THREE.Mesh(
       new THREE.BoxGeometry(map.width + 5.7, 0.22, map.height + 5.7),
       new THREE.MeshStandardMaterial({ color: '#272521', roughness: 1, flatShading: true }),
@@ -398,10 +409,10 @@ export class City3DRenderer {
     this.seagulls.update((performance.now() - this.animationStartedAt) / 1000)
   }
 
-  private engravedLabel(label: string) {
+  private engravedLabel(label: string, aspect = 1) {
     const canvas = document.createElement('canvas')
     canvas.height = 128
-    canvas.width = 128
+    canvas.width = Math.ceil(128 * aspect)
     const context = canvas.getContext('2d')!
     context.fillStyle = '#ffffff'
     context.fillRect(0, 0, canvas.width, canvas.height)
@@ -1290,6 +1301,7 @@ export class City3DRenderer {
   }
 
   private draw = () => {
+    this.sky.update(this.camera, this.controls.target, Math.max(this.engine.map.width, this.engine.map.height))
     this.renderer.render(this.scene, this.camera)
   }
 
@@ -1322,6 +1334,7 @@ export class City3DRenderer {
     this.resizeObserver.disconnect()
     this.renderer.setAnimationLoop(null)
     this.seagulls.dispose()
+    this.sky.dispose()
     this.engravingTextures.forEach((texture) => texture.dispose())
     this.controls.removeEventListener('change', this.draw)
     this.controls.dispose()
