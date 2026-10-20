@@ -31,6 +31,7 @@ export function generate(settings: GeneratorSettings): { map: CityMap; program: 
     green: int(random, 4) as Direction,
   }))
   const map: CityMap = {
+    scenerySeed: settings.seed,
     columns: settings.columns,
     rows: settings.rows,
     horizontalLengths,

@@ -11,6 +11,7 @@ export interface CrossingSpec {
 }
 
 export interface CityMap {
+  scenerySeed?: number
   columns: number
   rows: number
   horizontalLengths: number[]

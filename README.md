@@ -34,7 +34,7 @@ A kis előnézetre kattintva animáltan felcserélhető a nagy 3D dioráma és a
 
 ## 3D modellek
 
-A WebGL-nézet a Kenney CC0 licencű **City Kit (Commercial)**, **City Kit (Roads)** és **Car Kit** GLB modelljeit használja. A csomagok eredeti licencfájljai a modellek mellett, a `public/models/kenney` könyvtárban találhatók.
+A WebGL-nézet a Kenney CC0 licencű **City Kit (Commercial)**, **City Kit (Roads)**, **City Kit (Suburban)**, **Car Kit**, **Nature Kit** és **Mini Skate** modelljeit használja. A zöld blokkok helyét a város seedje sorsolja ki: szökőkutas park, virágoskert, napernyős piknikezőhely és teljesen erdős telek is lehet belőlük. A szökőkút a modellekhez illő egyszerű Three.js geometria. A házak közötti szabad területeket növények, padok, ültetőládák és napernyős pihenők töltik ki. Az elhelyezés a modellek tényleges méretét figyelembe veszi, az ismétlődő növényeket közös rajzolás gyorsítja. A csomagok eredeti licencfájljai a modellek mellett, a `public/models/kenney` könyvtárban találhatók.
 
 ## A port felépítése
 

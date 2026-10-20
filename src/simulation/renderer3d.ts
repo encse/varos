@@ -3,14 +3,13 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { CityEngine, PALETTE, type Car, type Kereszt } from './engine'
 import { carPoseAt, LANE_INSET } from './motion'
-import { isParkBlock } from './scenery'
+import { fitsInYard, planParks, sceneryHash, yardSpots, type ParkKind, type YardFootprint } from './scenery'
 import { Seagulls } from './seagulls'
 import { CAR_APPEARANCES } from './carAppearance'
 
 type Signal = { red: THREE.Mesh; green: THREE.Mesh; node: Kereszt; direction: number }
 type ParkProp = { template: THREE.Object3D; file: typeof PARK_PROP_FILES[number] }
 type ModelProp = { template: THREE.Object3D }
-type YardFootprint = { x: number; z: number; width: number; depth: number }
 
 const BUILDING_FILES = [
   ...'abcdefghijklmn'.split('').map((letter) => `building-${letter}`),
@@ -30,6 +29,15 @@ const PARK_PROP_FILES = [
 const MINI_SKATE_FILES = [
   'half-pipe', 'structure-wood-platform', 'bowl-corner-inner', 'rail-high',
 ] as const
+const URBAN_PROP_FILES = [
+  { name: 'bench', folder: 'mini-skate', scale: 0.45 },
+  { name: 'benches', folder: 'mini-skate', scale: 0.45 },
+  { name: 'planter', folder: 'suburban', scale: 1.55 },
+  { name: 'path-stones-short', folder: 'suburban', scale: 1.55 },
+  { name: 'detail-parasol-a', folder: 'commercial', scale: 1.55 },
+  { name: 'detail-parasol-b', folder: 'commercial', scale: 1.55 },
+] as const
+type UrbanPropName = typeof URBAN_PROP_FILES[number]['name']
 
 const ROAD_Y = 0
 const ROAD_DETAIL_Y = 0.004
@@ -81,6 +89,10 @@ export class City3DRenderer {
   private treeModels: THREE.Object3D[] = []
   private parkProps: ParkProp[] = []
   private miniSkateProps: ModelProp[] = []
+  private readonly urbanProps = new Map<UrbanPropName, { template: THREE.Object3D; scale: number }>()
+  private readonly pavingGeometries = new Map<string, THREE.BoxGeometry>()
+  private readonly pavingMaterials = new Map<string, THREE.MeshStandardMaterial>()
+  private parks = new Map<string, ParkKind>()
   private roadStraightModel: THREE.Object3D | null = null
   private roadStraightHalfModel: THREE.Object3D | null = null
   private roadCrossroadModel: THREE.Object3D | null = null
@@ -198,10 +210,16 @@ export class City3DRenderer {
         loader.loadAsync(`${base}/roads/road-crossroad-path.glb`),
       ]),
       loader.loadAsync(`${base}/roads/traffic-light.glb`),
+      Promise.allSettled(URBAN_PROP_FILES.map(({ name, folder }) => loader.loadAsync(`${base}/${folder}/${name}.glb`))),
     ])
     if (this.disposed) return
 
-    const [buildings, cars, trees, parkDetails, miniSkate, roads, trafficLight] = results
+    const [buildings, cars, trees, parkDetails, miniSkate, roads, trafficLight, urban] = results
+    if (urban.status === 'fulfilled') urban.value.forEach((result, index) => {
+      if (result.status !== 'fulfilled') return
+      const { name, scale } = URBAN_PROP_FILES[index]
+      this.urbanProps.set(name, { template: this.prepareTemplate(result.value.scene), scale })
+    })
     if (buildings.status === 'fulfilled') {
       this.buildingModels = buildings.value.map(({ scene }) => this.prepareTemplate(scene))
     }
@@ -232,7 +250,7 @@ export class City3DRenderer {
     }
 
     results.forEach((result, index) => {
-      if (result.status === 'rejected') console.warn(`A(z) ${['épület', 'autó', 'fa', 'parkdísz', 'skatepark', 'út', 'lámpa'][index]} modellek nem tölthetők be.`, result.reason)
+      if (result.status === 'rejected') console.warn(`A(z) ${['épület', 'autó', 'fa', 'parkdísz', 'skatepark', 'út', 'lámpa', 'udvardísz'][index]} modellek nem tölthetők be.`, result.reason)
     })
 
     this.clearGroup(this.staticGroup, true)
@@ -269,6 +287,7 @@ export class City3DRenderer {
         material.metalness = 0
         material.roughness = 1
         if (/leaf/i.test(material.name)) material.color.set('#2f9b57')
+        if (/grass/i.test(material.name)) material.color.set('#568344')
         material.needsUpdate = true
       })
     })
@@ -308,6 +327,7 @@ export class City3DRenderer {
 
   private buildCity() {
     const { map } = this.engine
+    this.parks = planParks(map)
     this.engravingTextures.forEach((texture) => texture.dispose())
     this.engravingTextures.length = 0
     this.carClippingPlanes[0].constant = this.carClippingPlanes[1].constant = map.width / 2
@@ -373,6 +393,7 @@ export class City3DRenderer {
     if (this.roadStraightModel && this.roadStraightHalfModel && this.roadCrossroadModel) this.addModelRoads()
     else this.addRoadMarkings()
     this.addTrafficLights()
+    this.batchSceneryModels()
     this.seagulls.setBounds(map.width, map.height, new THREE.Box3().setFromObject(this.staticGroup).max.y)
     this.seagulls.update((performance.now() - this.animationStartedAt) / 1000)
   }
@@ -413,8 +434,9 @@ export class City3DRenderer {
     yard.receiveShadow = true
     this.staticGroup.add(yard)
 
-    if (isParkBlock(row, column, width, height)) {
-      this.addPark(left, top, width, height, row, column)
+    const parkKind = this.parks.get(`${row}:${column}`)
+    if (parkKind) {
+      this.addPark(left, top, width, height, row, column, parkKind)
       return
     }
 
@@ -575,134 +597,374 @@ export class City3DRenderer {
     occupied: YardFootprint[],
   ) {
     const { map } = this.engine
-    const margin = 0.55
-    const candidates = [
-      [margin, margin], [width - margin, margin],
-      [margin, height - margin], [width - margin, height - margin],
-      [width / 2, margin], [width / 2, height - margin],
-      [margin, height / 2], [width - margin, height / 2],
-    ] as const
-    const free = candidates
-      .map((_, index) => candidates[(index + seed) % candidates.length])
-      .filter(([x, z]) => occupied.every((building) => (
-        Math.abs(x - building.x) > building.width / 2 + 0.3
-        || Math.abs(z - building.z) > building.depth / 2 + 0.3
-      )))
-      .slice(0, 4)
+    const worldX = left - map.width / 2
+    const worldZ = top - map.height / 2
+    const buildings = [...occupied]
+    const treeFootprints = new Set<YardFootprint>()
+    const spots = yardSpots(width, height, seed)
+    const place = (model: THREE.Object3D | null, x: number, z: number, rotation = 0, undergrowth = false) => {
+      if (!model) return false
+      model.rotation.y = rotation
+      model.updateWorldMatrix(true, true)
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3())
+      const footprint = { x, z, width: size.x, depth: size.z }
+      const obstacles = undergrowth ? occupied.map((item) => treeFootprints.has(item)
+        ? { ...item, width: 0.22, depth: 0.22 } : item) : occupied
+      if (!fitsInYard(footprint, width, height, obstacles)) return false
+      model.position.set(worldX + x, SCENERY_BASE_Y, worldZ + z)
+      this.staticGroup.add(model)
+      occupied.push(footprint)
+      return true
+    }
 
-    free.forEach(([localX, localZ], index) => {
-      const x = left + localX - map.width / 2
-      const z = top + localZ - map.height / 2
-      if (index % 2 === 0 && this.treeModels.length) {
-        const tree = this.nativeModel(
-          this.treeModels[(seed + index * 5) % this.treeModels.length],
-          SOURCE_SCALE.nature,
-        )
-        tree.position.set(x, SCENERY_BASE_Y, z)
-        tree.rotation.y = ((seed + index * 3) % 8) * Math.PI / 4
-        this.staticGroup.add(tree)
-      } else {
-        const distances = [localZ, width - localX, height - localZ, localX]
-        const nearestEdge = distances.indexOf(Math.min(...distances))
-        this.addBench(x, z, [0, -Math.PI / 2, Math.PI, Math.PI / 2][nearestEdge])
+    // A házak körül megszakított járdaszegély: csak a ténylegesen szabad szakaszok épülnek meg.
+    const pave = (x: number, z: number, w: number, d: number) => {
+      const footprint = { x, z, width: w, depth: d }
+      if (!fitsInYard(footprint, width, height, buildings, 0.04)) return
+      this.addPaving(worldX + x, worldZ + z, w, d, '#b6b2a4')
+      occupied.push(footprint)
+    }
+    for (let x = 0.55; x <= width - 0.55; x += 0.65) {
+      pave(x, 0.23, 0.64, 0.3)
+      pave(x, height - 0.23, 0.64, 0.3)
+    }
+    for (let z = 0.65; z <= height - 0.65; z += 0.65) {
+      pave(0.23, z, 0.3, 0.64)
+      pave(width - 0.23, z, 0.3, 0.64)
+    }
+
+    // Előbb a nagyobb elemeket helyezzük el, utána a köztük maradó réseket ültetjük be.
+    let trees = 0
+    let terraces = 0
+    let benches = 0
+    spots.forEach(({ x, z }, index) => {
+      const rotation = ((seed + index) % 4) * Math.PI / 2
+      if (trees < Math.ceil(width * height / 10) && this.treeModels.length) {
+        const tree = this.nativeModel(this.treeModels[(seed + index * 5) % this.treeModels.length], SOURCE_SCALE.nature)
+        if (place(tree, x, z, rotation)) { treeFootprints.add(occupied.at(-1)!); trees++; return }
       }
-    })
-  }
-
-  private addPark(left: number, top: number, width: number, height: number, row: number, column: number) {
-    const { map } = this.engine
-    const centerX = left + width / 2 - map.width / 2
-    const centerZ = top + height / 2 - map.height / 2
-    const pathMaterial = new THREE.MeshStandardMaterial({ color: '#c7b98f', roughness: 1, flatShading: true })
-    const horizontalPath = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.8, width - 0.72), 0.035, 0.34), pathMaterial)
-    const verticalPath = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.036, Math.max(0.8, height - 0.72)), pathMaterial)
-    horizontalPath.position.set(centerX, YARD_TOP_Y + 0.0175, centerZ)
-    verticalPath.position.set(centerX, YARD_TOP_Y + 0.018, centerZ)
-    horizontalPath.receiveShadow = true
-    verticalPath.receiveShadow = true
-    this.staticGroup.add(horizontalPath, verticalPath)
-
-    const seed = row * 37 + column * 19 + 13
-    const skateParkSize = SOURCE_SCALE.skate * WORLD_ASSET_SCALE * 3
-    const skateParkX = centerX + (seed % 2 ? 1 : -1) * width * 0.22
-    const skateParkZ = centerZ - height * 0.22
-    const hasSkatePark = this.miniSkateProps.length === MINI_SKATE_FILES.length && width >= 4 && height >= 4
-    const overlapsSkatePark = (x: number, z: number, padding: number) => hasSkatePark
-      && Math.abs(x - skateParkX) < skateParkSize / 2 + padding
-      && Math.abs(z - skateParkZ) < skateParkSize / 2 + padding
-
-    if (hasSkatePark) this.addMiniSkatePark(skateParkX, skateParkZ, skateParkSize)
-
-    const treeSpots = [
-      [-0.31, -0.31], [0, -0.34], [0.31, -0.3],
-      [-0.34, 0.02], [0.34, 0.03],
-      [-0.3, 0.31], [0.02, 0.34], [0.31, 0.29],
-    ]
-    treeSpots.forEach(([factorX, factorZ], index) => {
-      const x = centerX + factorX * Math.max(1.4, width - 0.7)
-      const z = centerZ + factorZ * Math.max(1.4, height - 0.7)
-      if (overlapsSkatePark(x, z, 0.22)) return
-      if (this.treeModels.length) {
-        const tree = this.nativeModel(
-          this.treeModels[(seed + index * 5) % this.treeModels.length],
-          SOURCE_SCALE.nature,
-        )
-        tree.position.set(x, SCENERY_BASE_Y, z)
-        tree.rotation.y = ((seed + index * 3) % 8) * Math.PI / 4
-        this.staticGroup.add(tree)
-      } else {
-        this.addFallbackTree(x, z, 1.7 + (index % 3) * 0.16)
-      }
-    })
-
-    if (this.parkProps.length) {
-      // Apró részletek a kereszt alakú sétány négy negyedében és a szélein.
-      // A sorrend determinisztikus, így ugyanahhoz az inputhoz ugyanaz a park jár.
-      const detailSpots = [
-        [-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2],
-        [-0.39, -0.15], [0.39, 0.15], [-0.15, 0.39], [0.15, -0.39],
-        [-0.36, 0.34], [0.36, -0.34], [-0.34, -0.37], [0.34, 0.37],
-      ]
-      detailSpots.forEach(([factorX, factorZ], index) => {
-        const detail = this.parkProps[(seed * 3 + index * 7) % this.parkProps.length]
-        const x = centerX + factorX * Math.max(1.4, width - 0.55)
-        const z = centerZ + factorZ * Math.max(1.4, height - 0.55)
-        if (detail.file.startsWith('flower_')) {
-          if (overlapsSkatePark(x, z, 0.5)) return
-          this.addFlowerPatch(x, z, seed + index)
+      if (terraces < (width * height >= 36 ? 2 : 1) && this.urbanProps.has('detail-parasol-a')) {
+        const footprint = { x, z, width: 1.15, depth: 1.15 }
+        if (fitsInYard(footprint, width, height, occupied)) {
+          this.addTerrace(worldX + x, worldZ + z, seed + index)
+          occupied.push(footprint)
+          terraces++
           return
         }
-        if (overlapsSkatePark(x, z, 0.08)) return
-        const model = this.nativeModel(detail.template, SOURCE_SCALE.nature)
-        model.position.set(x, YARD_TOP_Y, z)
-        model.rotation.y = ((seed + index * 3) % 8) * Math.PI / 4
-        this.staticGroup.add(model)
-      })
+      }
+      if (benches < 2 && place(this.urbanModel('bench'), x, z, rotation)) benches++
+    })
+
+    const bushes = this.parkProps.filter(({ file }) => file.startsWith('plant_bush'))
+    const grass = this.parkProps.filter(({ file }) => file.startsWith('grass'))
+    let flowerBeds = 0
+    spots.forEach(({ x, z }, index) => {
+      const rotation = ((seed + index * 3) % 8) * Math.PI / 4
+      if (index % 7 === 0 && place(this.urbanModel('planter'), x, z, rotation)) return
+      const bed = { x, z, width: 1, depth: 1 }
+      if (index % 4 === 0 && flowerBeds < 3 && fitsInYard(bed, width, height, occupied)) {
+        this.addFlowerPatch(worldX + x, worldZ + z, seed + index)
+        occupied.push(bed)
+        flowerBeds++
+        return
+      }
+      const props = index % 3 === 0 ? grass : bushes
+      const prop = props[(seed + index) % props.length]
+      if (prop) place(this.nativeModel(prop.template, SOURCE_SCALE.nature), x, z, rotation, true)
+    })
+
+    // A legkeskenyebb résekben is elférnek a készlet apró lépőkövei és fűcsomói.
+    yardSpots(width, height, seed + 71, 0.48).forEach(({ x, z }, index) => {
+      if (index % 3 !== 0) return
+      if (index % 2 === 0) place(this.urbanModel('path-stones-short'), x, z, seed % 4 * Math.PI / 2)
+      else if (grass.length) place(this.nativeModel(grass[index % grass.length].template, SOURCE_SCALE.nature), x, z, 0, true)
+    })
+  }
+
+  private addPark(left: number, top: number, width: number, height: number, row: number, column: number, kind: ParkKind) {
+    const seed = sceneryHash(this.engine.map.scenerySeed ?? 0, row, column)
+    if (kind === 'woodland') {
+      this.addWoodland(left, top, width, height, seed)
+      return
+    }
+    const { map } = this.engine
+    const worldX = left - map.width / 2
+    const worldZ = top - map.height / 2
+    const hubX = width * (kind === 'garden' ? 0.38 : kind === 'picnic' ? 0.64 : 0.5)
+    const hubZ = height * (kind === 'garden' ? 0.62 : kind === 'picnic' ? 0.36 : 0.5)
+    const centerX = worldX + hubX
+    const centerZ = worldZ + hubZ
+    const occupied: YardFootprint[] = []
+    const treeFootprints = new Set<YardFootprint>()
+    const pave = (x: number, z: number, w: number, d: number) => {
+      this.addPaving(worldX + x, worldZ + z, w, d, '#c3b899')
+      occupied.push({ x, z, width: w, depth: d })
+    }
+    // A találkozópont és a sétányok elrendezése is a park típusát követi.
+    pave(width / 2, hubZ, width - 0.25, 0.42)
+    pave(hubX, height / 2, 0.42, height - 0.25)
+    for (const z of [0.62, height - 0.62]) pave(width / 2, z, width - 1.0, 0.28)
+    for (const x of [0.62, width - 0.62]) pave(x, height / 2, 0.28, height - 1.0)
+    const plazaRadius = Math.min(width, height) * 0.13
+    const plaza = new THREE.Mesh(new THREE.CylinderGeometry(plazaRadius, plazaRadius, 0.04, 24),
+      new THREE.MeshStandardMaterial({ color: '#d3cbb7', roughness: 1 }))
+    plaza.position.set(centerX, YARD_TOP_Y + 0.03, centerZ)
+    plaza.receiveShadow = true
+    this.staticGroup.add(plaza)
+    occupied.push({ x: hubX, z: hubZ, width: plazaRadius * 2 + 0.15, depth: plazaRadius * 2 + 0.15 })
+    if (kind === 'fountain') this.addFountain(centerX, centerZ, plazaRadius * 0.75)
+    if (kind === 'garden') this.addFlowerPatch(centerX, centerZ, seed, Math.min(1, plazaRadius * 1.4))
+    if (kind === 'picnic') this.addTerrace(centerX, centerZ, seed)
+
+    if (kind === 'picnic' && width >= 7 && height >= 7 && this.miniSkateProps.length === MINI_SKATE_FILES.length) {
+      const size = SOURCE_SCALE.skate * WORLD_ASSET_SCALE * 3
+      const x = width * 0.27
+      const z = height * 0.73
+      const footprint = { x, z, width: size + 0.25, depth: size + 0.25 }
+      if (fitsInYard(footprint, width, height, occupied)) {
+        this.addMiniSkatePark(worldX + x, worldZ + z, size)
+        occupied.push(footprint)
+      }
     }
 
-    // A Nature Kitben nincs pad; egyszerű low-poly pad egészíti ki a valódi növényzetet.
+    const place = (model: THREE.Object3D | null, x: number, z: number, rotation = 0, undergrowth = false) => {
+      if (!model) return false
+      model.rotation.y = rotation
+      model.updateWorldMatrix(true, true)
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3())
+      const footprint = { x, z, width: size.x, depth: size.z }
+      const obstacles = undergrowth ? occupied.map((item) => treeFootprints.has(item)
+        ? { ...item, width: 0.22, depth: 0.22 } : item) : occupied
+      if (!fitsInYard(footprint, width, height, obstacles, 0.06)) return false
+      model.position.set(worldX + x, SCENERY_BASE_Y, worldZ + z)
+      this.staticGroup.add(model)
+      occupied.push(footprint)
+      return true
+    }
+    // Padok a sétányok felé, páros virágládákkal; a kis modellek nem torlaszolják el az utat.
     for (const side of [-1, 1]) {
-      this.addBench(
-        centerX + side * width * 0.23,
-        centerZ + height * 0.06,
-        side < 0 ? Math.PI / 2 : -Math.PI / 2,
-      )
+      const x = hubX + side * Math.max(0.8, plazaRadius + 0.3)
+      for (const z of [hubZ - 0.48, hubZ + 0.48]) {
+        place(this.urbanModel('bench'), x, z, z < hubZ ? 0 : Math.PI)
+      }
+      place(this.urbanModel('planter'), hubX + side * width * 0.29, hubZ + 0.52)
+    }
+
+    const spots = yardSpots(width, height, seed, 0.82)
+    // Az ágyások előnyt kapnak a fákkal szemben: mind a négy ligetsarokban marad színfolt.
+    const bedSize = Math.min(0.9, Math.min(width, height) / 2 - plazaRadius - 0.995)
+    if (bedSize > 0.3) {
+      const inset = 0.84 + bedSize / 2
+      for (const x of [inset, width - inset]) for (const z of [inset, height - inset]) {
+        const bed = { x, z, width: bedSize, depth: bedSize }
+        if (!fitsInYard(bed, width, height, occupied, 0.06)) continue
+        this.addFlowerPatch(worldX + x, worldZ + z, seed, bedSize)
+        occupied.push(bed)
+      }
+    }
+    let trees = 0
+    spots.forEach(({ x, z }, index) => {
+      if (trees >= Math.max(4, Math.floor(width * height / 5)) || !this.treeModels.length) return
+      const tree = this.nativeModel(this.treeModels[(seed + index * 5) % this.treeModels.length], SOURCE_SCALE.nature)
+      if (place(tree, x, z, index * Math.PI / 4)) { treeFootprints.add(occupied.at(-1)!); trees++ }
+    })
+    // Összefüggő ágyások és aljnövényzet: a városi parkba nem szórunk tuskókat és gombákat.
+    const shrubs = this.parkProps.filter(({ file }) => file.startsWith('plant_bush') || file === 'grass_leafs')
+    let beds = 0
+    yardSpots(width, height, seed + 101, 0.58).forEach(({ x, z }, index) => {
+      const footprint = { x, z, width: 1, depth: 1 }
+      if (beds < Math.max(2, Math.floor(width * height / 12)) && fitsInYard(footprint, width, height, occupied)) {
+        this.addFlowerPatch(worldX + x, worldZ + z, seed + index)
+        occupied.push(footprint)
+        beds++
+        return
+      }
+      const prop = shrubs[(seed + index) % shrubs.length]
+      if (prop) place(this.nativeModel(prop.template, SOURCE_SCALE.nature), x, z, index * Math.PI / 4, true)
+    })
+    if (!this.treeModels.length) {
+      for (const x of [width * 0.28, width * 0.72]) for (const z of [height * 0.28, height * 0.72]) {
+        this.addFallbackTree(worldX + x, worldZ + z, 1.8)
+      }
     }
   }
 
-  private addFlowerPatch(x: number, z: number, seed: number) {
+  private addWoodland(left: number, top: number, width: number, height: number, seed: number) {
+    const worldX = left - this.engine.map.width / 2
+    const worldZ = top - this.engine.map.height / 2
+    this.addPaving(worldX + width / 2, worldZ + height / 2, width - 0.08, height - 0.08, '#63794e')
+    const trunks: YardFootprint[] = []
+    const candidates = Array.from({ length: Math.ceil(width * height * 8) }, (_, index) => ({
+      x: 0.35 + sceneryHash(seed, index, 41) / 4294967296 * (width - 0.7),
+      z: 0.35 + sceneryHash(seed, index, 83) / 4294967296 * (height - 0.7),
+    }))
+    let trees = 0
+    for (let index = 0; index < candidates.length; index++) {
+      if (!this.treeModels.length || trees >= Math.ceil(width * height * 0.55)) break
+      const { x, z } = candidates[index]
+      const model = this.nativeModel(this.treeModels[sceneryHash(seed, index, 17) % this.treeModels.length], SOURCE_SCALE.nature)
+      model.rotation.y = sceneryHash(seed, index, 59) / 4294967296 * Math.PI * 2
+      model.updateWorldMatrix(true, true)
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3())
+      // A koronák összezárhatnak, de a teljes erdő a telekhatáron belül marad.
+      if (!fitsInYard({ x, z, width: size.x, depth: size.z }, width, height, trunks, 0.06)) continue
+      model.position.set(worldX + x, SCENERY_BASE_Y, worldZ + z)
+      this.staticGroup.add(model)
+      trunks.push({ x, z, width: 0.22, depth: 0.22 })
+      trees++
+    }
+    const undergrowth = this.parkProps.filter(({ file }) =>
+      file.startsWith('plant_bush') || file.startsWith('grass') || file.startsWith('mushroom')
+      || file.startsWith('rock_') || file === 'stump_roundDetailed' || file === 'log')
+    let planted = 0
+    for (let index = 0; index < candidates.length && undergrowth.length; index++) {
+      if (planted >= Math.ceil(width * height * 0.9)) break
+      const { x, z } = candidates[(index + 113) % candidates.length]
+      const prop = undergrowth[sceneryHash(seed, index, 107) % undergrowth.length]
+      const model = this.nativeModel(prop.template, SOURCE_SCALE.nature)
+      model.rotation.y = sceneryHash(seed, index, 29) / 4294967296 * Math.PI * 2
+      model.updateWorldMatrix(true, true)
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3())
+      const footprint = { x, z, width: size.x, depth: size.z }
+      if (!fitsInYard(footprint, width, height, trunks, 0.04)) continue
+      model.position.set(worldX + x, SCENERY_BASE_Y, worldZ + z)
+      this.staticGroup.add(model)
+      trunks.push(footprint)
+      planted++
+    }
+    if (!this.treeModels.length) {
+      for (const x of [width * 0.25, width * 0.5, width * 0.75]) {
+        for (const z of [height * 0.25, height * 0.5, height * 0.75]) this.addFallbackTree(worldX + x, worldZ + z, 1.9)
+      }
+    }
+  }
+
+  private addFountain(x: number, z: number, radius: number) {
+    const fountain = new THREE.Group()
+    const stone = new THREE.MeshStandardMaterial({ color: '#b9beb6', roughness: 0.85, flatShading: true })
+    const water = new THREE.MeshStandardMaterial({ color: '#4caebd', roughness: 0.18, metalness: 0.15 })
+    const spray = new THREE.MeshStandardMaterial({ color: '#b9edf0', roughness: 0.25, transparent: true, opacity: 0.8 })
+    const basin = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 1.05, 0.16, 20), stone)
+    basin.position.y = 0.08
+    const surface = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.83, 24), water)
+    surface.rotation.x = -Math.PI / 2
+    surface.position.y = 0.165
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.94, radius * 0.1, 6, 24), stone)
+    rim.rotation.x = -Math.PI / 2
+    rim.position.y = 0.17
+    const column = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.085, radius * 0.6, 8), stone)
+    column.position.y = 0.16 + radius * 0.3
+    fountain.add(basin, surface, rim, column)
+    for (let index = 0; index < 6; index++) {
+      const angle = index * Math.PI / 3
+      const dx = Math.cos(angle)
+      const dz = Math.sin(angle)
+      const arc = new THREE.QuadraticBezierCurve3(
+        new THREE.Vector3(0, 0.16 + radius * 0.6, 0),
+        new THREE.Vector3(dx * radius * 0.25, 0.16 + radius * 1.4, dz * radius * 0.25),
+        new THREE.Vector3(dx * radius * 0.68, 0.17, dz * radius * 0.68),
+      )
+      fountain.add(new THREE.Mesh(new THREE.TubeGeometry(arc, 12, 0.012, 4, false), spray))
+    }
+    fountain.position.set(x, YARD_TOP_Y + 0.05, z)
+    fountain.traverse((object) => {
+      if (object instanceof THREE.Mesh) { object.castShadow = object.material === stone; object.receiveShadow = true }
+    })
+    this.staticGroup.add(fountain)
+  }
+
+  private urbanModel(name: UrbanPropName) {
+    const prop = this.urbanProps.get(name)
+    return prop ? this.nativeModel(prop.template, prop.scale) : null
+  }
+
+  private batchSceneryModels() {
+    const geometries = new Set<THREE.BufferGeometry>(this.pavingGeometries.values())
+    for (const template of [
+      ...this.treeModels, ...this.parkProps.map(({ template }) => template),
+      ...[...this.urbanProps.values()].map(({ template }) => template),
+    ]) template.traverse((object) => {
+      if (object instanceof THREE.Mesh) geometries.add(object.geometry)
+    })
+    const batches = new Map<string, THREE.Mesh[]>()
+    this.staticGroup.updateWorldMatrix(true, true)
+    this.staticGroup.traverse((object) => {
+      if (!(object instanceof THREE.Mesh) || !geometries.has(object.geometry)) return
+      const materials = Array.isArray(object.material) ? object.material : [object.material]
+      const key = [object.geometry.uuid, ...materials.map((material) => material.uuid), object.castShadow, object.receiveShadow].join(':')
+      const batch = batches.get(key) ?? []
+      batch.push(object)
+      batches.set(key, batch)
+    })
+    for (const meshes of batches.values()) {
+      if (meshes.length < 3) continue
+      const first = meshes[0]
+      const instances = new THREE.InstancedMesh(first.geometry, first.material, meshes.length)
+      instances.castShadow = first.castShadow
+      instances.receiveShadow = first.receiveShadow
+      instances.userData.sharedAsset = true
+      meshes.forEach((mesh, index) => {
+        instances.setMatrixAt(index, mesh.matrixWorld)
+        mesh.removeFromParent()
+      })
+      instances.instanceMatrix.needsUpdate = true
+      instances.computeBoundingSphere()
+      this.staticGroup.add(instances)
+    }
+  }
+
+  private addPaving(x: number, z: number, width: number, depth: number, color: string) {
+    const key = `${width}:${depth}`
+    let geometry = this.pavingGeometries.get(key)
+    if (!geometry) {
+      geometry = new THREE.BoxGeometry(width, 0.025, depth)
+      this.pavingGeometries.set(key, geometry)
+    }
+    let material = this.pavingMaterials.get(color)
+    if (!material) {
+      material = new THREE.MeshStandardMaterial({ color, roughness: 1, flatShading: true })
+      this.pavingMaterials.set(color, material)
+    }
+    const paving = new THREE.Mesh(geometry, material)
+    paving.userData.sharedAsset = true
+    paving.position.set(x, YARD_TOP_Y + 0.0125, z)
+    paving.receiveShadow = true
+    this.staticGroup.add(paving)
+  }
+
+  private addTerrace(x: number, z: number, seed: number) {
+    this.addPaving(x, z, 1.15, 1.15, '#b7ad98')
+    const parasol = this.urbanModel(seed % 2 ? 'detail-parasol-a' : 'detail-parasol-b')
+    if (parasol) {
+      parasol.position.set(x, YARD_TOP_Y + 0.025, z)
+      this.staticGroup.add(parasol)
+    }
+    const picnic = this.urbanModel('benches')
+    if (picnic) {
+      picnic.position.set(x, YARD_TOP_Y + 0.025, z)
+      this.staticGroup.add(picnic)
+    }
+  }
+
+  private addFlowerPatch(x: number, z: number, seed: number, size = 1) {
     const flowers = this.parkProps.filter(({ file }) => file.startsWith('flower_'))
     if (!flowers.length) return
 
     const patch = new THREE.Group()
     const soil = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.46, 0.48, 0.025, 12),
+      new THREE.CylinderGeometry(0.46 * size, 0.48 * size, 0.025, 12),
       new THREE.MeshStandardMaterial({ color: '#5d4b38', roughness: 1, flatShading: true }),
     )
     soil.scale.z = 0.92
     soil.position.y = 0.0125
     soil.receiveShadow = true
     patch.add(soil)
+    const edging = new THREE.Mesh(new THREE.TorusGeometry(0.46 * size, 0.025, 4, 16),
+      new THREE.MeshStandardMaterial({ color: '#c1b7a0', roughness: 1 }))
+    edging.rotation.x = -Math.PI / 2
+    edging.position.y = 0.025
+    edging.receiveShadow = true
+    patch.add(edging)
 
     // Közel egy teljes 1 x 1-es városi egységet kitöltő, szabálytalan ágyás.
     const spots = [
@@ -710,10 +972,10 @@ export class City3DRenderer {
       [-0.03, 0.19], [0.03, -0.2], [-0.31, -0.12], [0.3, -0.13],
       [-0.31, 0.14], [0.31, 0.14], [-0.13, 0.33], [0.14, -0.34],
     ] as const
-    spots.forEach(([flowerX, flowerZ], index) => {
+    spots.slice(0, size < 0.7 ? 5 : spots.length).forEach(([flowerX, flowerZ], index) => {
       const flower = flowers[(seed + index * 2) % flowers.length]
       const model = this.nativeModel(flower.template, SOURCE_SCALE.nature)
-      model.position.set(flowerX, 0.025, flowerZ)
+      model.position.set(flowerX * size, 0.025, flowerZ * size)
       model.rotation.y = ((seed + index * 3) % 8) * Math.PI / 4
       patch.add(model)
     })
@@ -721,26 +983,6 @@ export class City3DRenderer {
     patch.position.set(x, YARD_TOP_Y, z)
     patch.rotation.y = (seed % 8) * Math.PI / 4
     this.staticGroup.add(patch)
-  }
-
-  private addBench(x: number, z: number, rotation: number) {
-    const bench = new THREE.Group()
-    const wood = new THREE.MeshStandardMaterial({ color: '#76523b', roughness: 0.95, flatShading: true })
-    const dark = new THREE.MeshStandardMaterial({ color: '#292d29', roughness: 1, flatShading: true })
-    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.055, 0.13), wood)
-    seat.position.y = 0.15
-    const back = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.17, 0.045), wood)
-    back.position.set(0, 0.23, -0.05)
-    const legs = [-0.13, 0.13].map((legX) => {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.14, 0.09), dark)
-      leg.position.set(legX, 0.07, 0)
-      return leg
-    })
-    bench.add(seat, back, ...legs)
-    bench.position.set(x, SCENERY_BASE_Y, z)
-    bench.rotation.y = rotation
-    bench.traverse((object) => { if (object instanceof THREE.Mesh) object.castShadow = true })
-    this.staticGroup.add(bench)
   }
 
   private addMiniSkatePark(x: number, z: number, size: number) {
@@ -1058,16 +1300,20 @@ export class City3DRenderer {
   }
 
   private clearGroup(group: THREE.Group, dispose: boolean) {
-    while (group.children.length) {
-      const child = group.children.pop()!
-      if (dispose && !child.userData.sharedAsset) {
-        child.traverse((object) => {
-          if (!(object instanceof THREE.Mesh)) return
-          object.geometry.dispose()
-          const materials = Array.isArray(object.material) ? object.material : [object.material]
-          materials.forEach((material) => material.dispose())
-        })
+    const release = (object: THREE.Object3D) => {
+      if (object instanceof THREE.InstancedMesh) object.dispose()
+      if (object.userData.sharedAsset) return
+      if (object instanceof THREE.Mesh) {
+        object.geometry.dispose()
+        const materials = Array.isArray(object.material) ? object.material : [object.material]
+        materials.forEach((material) => material.dispose())
       }
+      object.children.forEach(release)
+    }
+    while (group.children.length) {
+      const child = group.children[group.children.length - 1]
+      group.remove(child)
+      if (dispose) release(child)
     }
   }
 
@@ -1081,6 +1327,8 @@ export class City3DRenderer {
     this.controls.dispose()
     this.clearGroup(this.staticGroup, true)
     this.clearGroup(this.carGroup, false)
+    this.pavingGeometries.forEach((geometry) => geometry.dispose())
+    this.pavingMaterials.forEach((material) => material.dispose())
     this.carBody.dispose()
     this.carCabin.dispose()
     this.wheel.dispose()
@@ -1098,6 +1346,8 @@ export class City3DRenderer {
       ...this.carModels,
       ...this.treeModels,
       ...this.parkProps.map(({ template }) => template),
+      ...this.miniSkateProps.map(({ template }) => template),
+      ...[...this.urbanProps.values()].map(({ template }) => template),
       this.roadStraightModel,
       this.roadStraightHalfModel,
       this.roadCrossroadModel,
