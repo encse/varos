@@ -53,6 +53,7 @@ export class Auto {
   /** Csak a megjelenítés használja; a szimuláció döntéseibe nem szól bele. */
   visualPath: CarPose[] = []
   visualTurns: VisualTurn[] = []
+  visualSpeed: { start: number; end: number } | null = null
   route: number[] = [0]
   hossz = 0
   EGYSEG = 0
@@ -143,6 +144,7 @@ export class Auto {
   irany() { return this.direction }
 
   beginVisualStep() {
+    this.visualSpeed = null
     this.visualTurns = this.visualTurns.filter(({ center }) =>
       Math.abs(this.x - center.x) <= 3 && Math.abs(this.y - center.y) <= 3)
     this.visualPath = this.state === 'active'

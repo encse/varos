@@ -6,6 +6,21 @@ export interface AnimatedCarPose extends CarPose {
 
 export const LANE_INSET = 0.18
 
+export function pathDistance(path: readonly CarPose[]): number {
+  return path.slice(1).reduce((sum, point, index) =>
+    sum + Math.hypot(point.x - path[index].x, point.y - path[index].y), 0)
+}
+
+/** Köbös Hermite-görbe: a körhatárokon a hely és a sebesség is folytonos. */
+function travelledDistance(car: Car, progress: number, distance: number): number {
+  const t = Math.max(0, Math.min(1, progress))
+  if (!car.visualSpeed) return t * distance
+  const { start, end } = car.visualSpeed
+  return (-2 * t ** 3 + 3 * t ** 2) * distance
+    + (t ** 3 - 2 * t ** 2 + t) * start
+    + (t ** 3 - t ** 2) * end
+}
+
 export function carPoseAt(car: Car, progress: number, laneInset = 0): AnimatedCarPose | null {
   const path = car.visualPath
   if (progress >= 1 && car.state !== 'active') return null
@@ -17,7 +32,7 @@ export function carPoseAt(car: Car, progress: number, laneInset = 0): AnimatedCa
     length: Math.hypot(to.x - path[index].x, to.y - path[index].y),
   })).filter(({ length }) => length > 0)
   const distance = segments.reduce((sum, segment) => sum + segment.length, 0)
-  let remaining = Math.max(0, Math.min(1, progress)) * distance
+  let remaining = travelledDistance(car, progress, distance)
   let point = path.at(-1)!
   for (const segment of segments) {
     if (remaining <= segment.length) {

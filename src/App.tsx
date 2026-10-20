@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CityEngine } from './simulation/engine'
+import { LookaheadMotion } from './simulation/lookahead'
 import { generateRandomCity } from './simulation/generator'
 import { renderCity } from './simulation/renderer'
 import { City3DRenderer } from './simulation/renderer3d'
@@ -24,6 +25,7 @@ function createBrowserWebGLContext(canvas: HTMLCanvasElement): BrowserWebGLConte
 export default function App() {
   const [city, setCity] = useState(() => generateRandomCity(crypto.getRandomValues(new Uint32Array(1))[0]))
   const [engine, setEngine] = useState(() => makeEngine(city.map, city.program))
+  const motion = useMemo(() => new LookaheadMotion(engine), [engine])
   const [stats, setStats] = useState(() => engine.stats())
   const [running, setRunning] = useState(false)
   const [rate, setRate] = useState(8)
@@ -98,7 +100,7 @@ export default function App() {
   const step = useCallback(() => {
     try {
       finishAnimation(engine)
-      engine.step()
+      motion.step()
       setStats(engine.stats())
       animateStep(engine)
       setError('')
@@ -106,7 +108,7 @@ export default function App() {
       setRunning(false)
       setError(problem instanceof Error ? problem.message : 'Ismeretlen szimulációs hiba.')
     }
-  }, [animateStep, engine, finishAnimation])
+  }, [animateStep, engine, finishAnimation, motion])
 
   useEffect(() => {
     if (!running) return
