@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { CityEngine, PALETTE, type Car, type Kereszt } from './engine'
-import { carPoseAt } from './motion'
+import { carPoseAt, LANE_INSET } from './motion'
 import { isParkBlock } from './scenery'
 
 type Signal = { red: THREE.Mesh; green: THREE.Mesh; node: Kereszt; direction: number }
@@ -37,7 +37,6 @@ const YARD_TOP_Y = YARD_HEIGHT
 // A díszmodellek talpa kissé fusson bele a gyepbe. A puszta felületi érintkezés
 // a low-poly talpaknál és az árnyék bias mellett lebegő résnek látszik.
 const SCENERY_BASE_Y = YARD_TOP_Y - 0.025
-const LANE_CENTER_FACTOR = 0.64
 // A Kenney csomagok eltérő forrásegységekkel készültek (például az útmodul
 // 1 egység, egy autó 2.55 egység hosszú). Csomagonként egyszer átváltjuk őket
 // a város közös méterrendszerébe; ezután minden modell ugyanazt a világskálát
@@ -927,7 +926,7 @@ export class City3DRenderer {
   private updateCars(progress = this.progress) {
     for (const child of this.carGroup.children) child.visible = false
     for (const car of this.engine.cars) {
-      const pose = carPoseAt(car, progress)
+      const pose = carPoseAt(car, progress, LANE_INSET)
       if (!pose) continue
       let model = this.carInstances.get(car)
       if (!model) {
@@ -937,16 +936,8 @@ export class City3DRenderer {
       }
       model.visible = true
       const roadSurfaceY = this.roadStraightModel ? MODEL_ROAD_TOP_Y : ROAD_DETAIL_Y
-      const rawX = pose.x - 0.5
-      const rawZ = pose.y - 0.5
-      const roadX = nearest(rawX, this.engine.xCrossings)
-      const roadZ = nearest(rawZ, this.engine.yCrossings)
-      // Egyenesben teljesen beljebb húzzuk a sávot; a kanyar ívén a két
-      // tengely korrekciója a pillanatnyi elfordulással folyamatosan keveredik.
-      const verticalWeight = Math.abs(Math.cos(pose.rotation))
-      const horizontalWeight = Math.abs(Math.sin(pose.rotation))
-      const x = THREE.MathUtils.lerp(rawX, roadX, (1 - LANE_CENTER_FACTOR) * verticalWeight)
-      const z = THREE.MathUtils.lerp(rawZ, roadZ, (1 - LANE_CENTER_FACTOR) * horizontalWeight)
+      const x = pose.x - 0.5
+      const z = pose.y - 0.5
       model.position.set(x - this.engine.map.width / 2, roadSurfaceY, z - this.engine.map.height / 2)
       model.rotation.y = pose.rotation
     }
@@ -1059,12 +1050,6 @@ function makeCabinGeometry() {
   geometry.setIndex(indices)
   geometry.computeVertexNormals()
   return geometry
-}
-
-function nearest(value: number, candidates: number[]) {
-  return candidates.reduce((closest, candidate) => (
-    Math.abs(candidate - value) < Math.abs(closest - value) ? candidate : closest
-  ))
 }
 
 function disposeObject(root: THREE.Object3D) {

@@ -1,117 +1,97 @@
-import type { Car, CarPose } from './engine'
+import type { Car, CarPose, VisualTurn } from './engine'
 
 export interface AnimatedCarPose extends CarPose {
   rotation: number
 }
 
-/** Egy logikai kör cellasorozatát folyamatos, lekerekített pályává alakítja. */
-export function carPoseAt(car: Car, progress: number): AnimatedCarPose | null {
-  // A jobb kanyar régi logikája ugyanarra a cellára előbb a régi, majd az új
-  // iránnyal ír pontot. Ez állapotváltás, nem megtett útszakasz: ha időt adunk
-  // neki, az autó a cella közepén helyben fordul. Ha előtte valóban haladt is,
-  // a régi irányú duplikátumot kivesszük, az új irányt pedig az érkezési pontra
-  // tesszük. A szimuláció és a foglaltság ettől változatlan marad.
-  const path = withoutStationaryTurnSegments(car.visualPath)
-  if (!path.length) {
-    return car.state === 'active'
-      ? { x: car.x, y: car.y, direction: car.direction, rotation: directionRotation(car.direction) }
-      : null
-  }
+export const LANE_INSET = 0.18
+
+export function carPoseAt(car: Car, progress: number, laneInset = 0): AnimatedCarPose | null {
+  const path = car.visualPath
   if (progress >= 1 && car.state !== 'active') return null
-  if (path.length === 1) {
-    return { ...path[0], rotation: directionRotation(path[0].direction) }
-  }
+  if (!path.length) return car.state === 'active' ? lanePose(car, laneInset) : null
 
-  const lastSegment = path.length - 1
-  const cursor = Math.max(0, Math.min(1, progress)) * lastSegment
-  const cornerRadius = 0.65
-  const activeSegment = Math.min(Math.floor(cursor), lastSegment - 1)
-  const activeFrom = path[Math.max(0, activeSegment)]
-  const activeTo = path[Math.max(0, activeSegment) + 1]
-
-  if (activeFrom.x === activeTo.x && activeFrom.y === activeTo.y && activeFrom.direction !== activeTo.direction) {
-    const amount = cursor - activeSegment
-    const eased = amount * amount * (3 - 2 * amount)
-    return {
-      x: activeFrom.x,
-      y: activeFrom.y,
-      direction: activeTo.direction,
-      rotation: lerpAngle(directionRotation(activeFrom.direction), directionRotation(activeTo.direction), eased),
+  // Az irányváltás önmagában nem megtett út és nem kap animációs időt.
+  const segments = path.slice(1).map((to, index) => ({
+    from: path[index], to,
+    length: Math.hypot(to.x - path[index].x, to.y - path[index].y),
+  })).filter(({ length }) => length > 0)
+  const distance = segments.reduce((sum, segment) => sum + segment.length, 0)
+  let remaining = Math.max(0, Math.min(1, progress)) * distance
+  let point = path.at(-1)!
+  for (const segment of segments) {
+    if (remaining <= segment.length) {
+      const amount = remaining / segment.length
+      point = {
+        x: segment.from.x + (segment.to.x - segment.from.x) * amount,
+        y: segment.from.y + (segment.to.y - segment.from.y) * amount,
+        direction: amount < 1 ? segment.from.direction : segment.to.direction,
+      }
+      break
     }
+    remaining -= segment.length
   }
-
-  // Ha a kör rögtön egy kanyarral kezdődik, nincs előző pályapont, amiből
-  // a sarkot levághatnánk. A két cella közti egyenest egy szinuszos oldalívvel
-  // hajlítjuk meg. Ez valamivel beljebb nyúlhat a kereszteződésbe (akár a szemközti
-  // sáv széléig), viszont nem csinál horgot és végig előrefelé halad.
-  if (activeSegment === 0 && activeFrom.direction !== activeTo.direction) {
-    const amount = cursor
-    const incoming = directionVector(activeFrom.direction)
-    const outgoing = directionVector(activeTo.direction)
-    const travelX = activeTo.x - activeFrom.x
-    const travelY = activeTo.y - activeFrom.y
-    const distance = Math.hypot(travelX, travelY) || 1
-    const turnSide = Math.sign(incoming.x * outgoing.y - incoming.y * outgoing.x) || 1
-    const bulge = Math.sin(amount * Math.PI) * Math.min(0.48, distance * 0.48) * turnSide
-    const normalX = travelY / distance
-    const normalY = -travelX / distance
-    const x = activeFrom.x + travelX * amount + normalX * bulge
-    const y = activeFrom.y + travelY * amount + normalY * bulge
-    const eased = amount * amount * (3 - 2 * amount)
-    return {
-      x,
-      y,
-      direction: activeTo.direction,
-      // A szög mindig monoton haladjon a régi iránytól az újig. Bizonyos
-      // egykörös útvonalaknál a Bézier geometriai érintője rövid időre
-      // visszafelé mutatna, miközben a pozíció íve továbbra is helyes.
-      rotation: lerpAngle(directionRotation(activeFrom.direction), directionRotation(activeTo.direction), eased),
-    }
+  // A belépéskor rögzített ív a körhatárokon át is ugyanaz marad.
+  for (const turn of car.visualTurns) {
+    const pose = turnPose(point, turn, laneInset)
+    if (pose) return pose
   }
+  return lanePose(point, laneInset)
+}
 
-  // A cellasarok előtt letérünk az egyenesről, és egy másodfokú Bézier-ívvel
-  // kötjük össze a két utcairányt. Így az autó nem megy át a derékszög csúcsán.
-  for (let cornerIndex = 1; cornerIndex < path.length - 1; cornerIndex++) {
-    const previous = path[cornerIndex - 1]
-    const corner = path[cornerIndex]
-    const next = path[cornerIndex + 1]
-    const incoming = unit(corner.x - previous.x, corner.y - previous.y)
-    const outgoing = unit(next.x - corner.x, next.y - corner.y)
-    const cross = incoming.x * outgoing.y - incoming.y * outgoing.x
-    if (Math.abs(cross) < 0.01) continue
-    if (cursor < cornerIndex - cornerRadius || cursor > cornerIndex + cornerRadius) continue
-
-    const amount = (cursor - (cornerIndex - cornerRadius)) / (cornerRadius * 2)
-    const entry = { x: corner.x - incoming.x * cornerRadius, y: corner.y - incoming.y * cornerRadius }
-    const exit = { x: corner.x + outgoing.x * cornerRadius, y: corner.y + outgoing.y * cornerRadius }
-    const inverse = 1 - amount
-    const x = inverse * inverse * entry.x + 2 * inverse * amount * corner.x + amount * amount * exit.x
-    const y = inverse * inverse * entry.y + 2 * inverse * amount * corner.y + amount * amount * exit.y
-    const dx = 2 * inverse * (corner.x - entry.x) + 2 * amount * (exit.x - corner.x)
-    const dy = 2 * inverse * (corner.y - entry.y) + 2 * amount * (exit.y - corner.y)
-    return {
-      x,
-      y,
-      direction: amount < 0.5 ? corner.direction : next.direction,
-      rotation: Math.atan2(dx, dy),
-    }
+function turnPose(point: CarPose, turn: VisualTurn, inset: number): AnimatedCarPose | null {
+  const incoming = directionVector(turn.incoming)
+  const outgoingDirection = (turn.incoming + (turn.turn === 1 ? 3 : 1)) % 4
+  const outgoing = directionVector(outgoingDirection)
+  const entry = {
+    x: turn.center.x + 0.5 - incoming.x * 1.5 - incoming.y * 0.5,
+    y: turn.center.y + 0.5 - incoming.y * 1.5 + incoming.x * 0.5,
   }
-
-  const segment = Math.min(Math.floor(cursor), lastSegment - 1)
-  const fromIndex = Math.max(0, segment)
-  const toIndex = fromIndex + 1
-  const from = path[fromIndex]
-  const to = path[toIndex]
-  const amount = cursor - segment
-  const dx = to.x - from.x
-  const dy = to.y - from.y
+  const dx = point.x - entry.x
+  const dy = point.y - entry.y
+  const alongIncoming = dx * incoming.x + dy * incoming.y
+  const alongOutgoing = dx * outgoing.x + dy * outgoing.y
+  const length = turn.turn === 1 ? 4 : 2
+  if (alongIncoming < -1e-8 || alongOutgoing < -1e-8
+    || alongIncoming > length / 2 + 1e-8 || alongOutgoing > length / 2 + 1e-8) return null
+  const travelled = Math.max(0, Math.min(length, alongIncoming + alongOutgoing))
+  // Balra előbb egyenesen belépünk, egyetlen cellanegyedben fordulunk,
+  // majd egyenesen kihajtunk. A jobb kanyar eleve ebben a kis negyedben fut.
+  const straight = turn.turn === 1 ? 1 : 0
+  if (travelled < straight) {
+    return lanePose({
+      x: entry.x + incoming.x * travelled,
+      y: entry.y + incoming.y * travelled,
+      direction: turn.incoming,
+    }, inset)
+  }
+  if (travelled > length - straight) {
+    const outgoingDistance = travelled - length / 2
+    return lanePose({
+      x: entry.x + incoming.x * length / 2 + outgoing.x * outgoingDistance,
+      y: entry.y + incoming.y * length / 2 + outgoing.y * outgoingDistance,
+      direction: outgoingDirection as CarPose['direction'],
+    }, inset)
+  }
+  const angle = (travelled - straight) / 2 * Math.PI / 2
+  const radius = turn.turn === 1 ? 1 - inset : 1 + inset
+  const sin = Math.sin(angle)
+  const cos = Math.cos(angle)
   return {
-    x: from.x + dx * amount,
-    y: from.y + dy * amount,
-    direction: to.direction,
-    rotation: Math.abs(dx) + Math.abs(dy) > 0.0001
-      ? Math.atan2(dx, dy)
-      : directionRotation(to.direction),
+    x: entry.x + incoming.x * straight + incoming.y * inset + outgoing.x * radius * (1 - cos) + incoming.x * radius * sin,
+    y: entry.y + incoming.y * straight - incoming.x * inset + outgoing.y * radius * (1 - cos) + incoming.y * radius * sin,
+    direction: angle < Math.PI / 4 ? turn.incoming : outgoingDirection as CarPose['direction'],
+    rotation: Math.atan2(incoming.x * cos + outgoing.x * sin, incoming.y * cos + outgoing.y * sin),
+  }
+}
+
+function lanePose(point: CarPose, inset: number): AnimatedCarPose {
+  const direction = directionVector(point.direction)
+  return {
+    x: point.x + direction.y * inset,
+    y: point.y - direction.x * inset,
+    direction: point.direction,
+    rotation: directionRotation(point.direction),
   }
 }
 
@@ -119,33 +99,9 @@ export function directionRotation(direction: number) {
   return [Math.PI, Math.PI / 2, 0, -Math.PI / 2][direction] ?? 0
 }
 
-function unit(x: number, y: number) {
-  const length = Math.hypot(x, y) || 1
-  return { x: x / length, y: y / length }
-}
-
 function directionVector(direction: number) {
   return [
-    { x: 0, y: -1 },
-    { x: 1, y: 0 },
-    { x: 0, y: 1 },
-    { x: -1, y: 0 },
+    { x: 0, y: -1 }, { x: 1, y: 0 },
+    { x: 0, y: 1 }, { x: -1, y: 0 },
   ][direction] ?? { x: 0, y: 1 }
-}
-
-function withoutStationaryTurnSegments(path: CarPose[]) {
-  if (path.length < 3) return path
-  return path.filter((point, index) => {
-    if (index === 0 || index === path.length - 1) return true
-    const previous = path[index - 1]
-    const next = path[index + 1]
-    const arrivedHere = previous.x !== point.x || previous.y !== point.y
-    const turnsHere = point.x === next.x && point.y === next.y && point.direction !== next.direction
-    return !(arrivedHere && turnsHere)
-  })
-}
-
-function lerpAngle(from: number, to: number, amount: number) {
-  const delta = ((to - from + Math.PI * 3) % (Math.PI * 2)) - Math.PI
-  return from + delta * amount
 }

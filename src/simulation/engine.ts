@@ -22,6 +22,12 @@ export interface CarPose {
   direction: Direction
 }
 
+export interface VisualTurn {
+  center: Coord
+  incoming: Direction
+  turn: 1 | 3
+}
+
 /** Az ifstream viselkedésének böngészős megfelelője. */
 class AutoFile {
   private at = 0
@@ -46,6 +52,7 @@ export class Auto {
   direction: Direction = 0
   /** Csak a megjelenítés használja; a szimuláció döntéseibe nem szól bele. */
   visualPath: CarPose[] = []
+  visualTurns: VisualTurn[] = []
   route: number[] = [0]
   hossz = 0
   EGYSEG = 0
@@ -136,6 +143,8 @@ export class Auto {
   irany() { return this.direction }
 
   beginVisualStep() {
+    this.visualTurns = this.visualTurns.filter(({ center }) =>
+      Math.abs(this.x - center.x) <= 3 && Math.abs(this.y - center.y) <= 3)
     this.visualPath = this.state === 'active'
       ? [{ x: this.where.x, y: this.where.y, direction: this.direction }]
       : []
@@ -419,6 +428,10 @@ export class Kereszt {
             car.allapot = AUTO_MEGHAL
             this.terulet[this.melyikZold] = null
           } else {
+            if (kovkanyar === 1 || kovkanyar === 3) {
+              car.visualTurns = car.visualTurns.filter(({ center }) => center.x !== this.where.x || center.y !== this.where.y)
+              car.visualTurns.push({ center: { ...this.where }, incoming: car.direction, turn: kovkanyar })
+            }
             switch (kovkanyar) {
               case 1:
                 car.turning++
