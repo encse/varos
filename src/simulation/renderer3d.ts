@@ -4,6 +4,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { CityEngine, PALETTE, type Car, type Kereszt } from './engine'
 import { carPoseAt, LANE_INSET } from './motion'
 import { isParkBlock } from './scenery'
+import { Seagulls } from './seagulls'
+import { CAR_APPEARANCES } from './carAppearance'
 
 type Signal = { red: THREE.Mesh; green: THREE.Mesh; node: Kereszt; direction: number }
 type ParkProp = { template: THREE.Object3D; file: typeof PARK_PROP_FILES[number] }
@@ -61,7 +63,16 @@ export class City3DRenderer {
   private readonly controls: OrbitControls
   private readonly staticGroup = new THREE.Group()
   private readonly carGroup = new THREE.Group()
+  private readonly carClippingPlanes = [
+    new THREE.Plane(new THREE.Vector3(1, 0, 0)),
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0)),
+    new THREE.Plane(new THREE.Vector3(0, 0, 1)),
+    new THREE.Plane(new THREE.Vector3(0, 0, -1)),
+  ]
+  private readonly seagulls = new Seagulls()
+  private readonly animationStartedAt = performance.now()
   private readonly signals: Signal[] = []
+  private readonly engravingTextures: THREE.CanvasTexture[] = []
   private readonly resizeObserver: ResizeObserver
   private engine: CityEngine
   private disposed = false
@@ -107,10 +118,11 @@ export class City3DRenderer {
     })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
+    this.renderer.localClippingEnabled = true
     this.renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.scene.background = new THREE.Color('#171918')
-    this.scene.add(this.staticGroup, this.carGroup)
+    this.scene.add(this.staticGroup, this.carGroup, this.seagulls.group)
 
     const hemisphere = new THREE.HemisphereLight('#d8edf0', '#3e3025', 2.15)
     const sun = new THREE.DirectionalLight('#fff0c2', 3.5)
@@ -146,6 +158,7 @@ export class City3DRenderer {
     this.resizeObserver.observe(canvas.parentElement ?? canvas)
     this.resize()
     this.update(engine)
+    this.renderer.setAnimationLoop(this.animateScenery)
     void this.loadKenneyModels()
   }
 
@@ -168,7 +181,7 @@ export class City3DRenderer {
     const loader = new GLTFLoader()
     const base = `${import.meta.env.BASE_URL}models/kenney`
     const buildingFiles = BUILDING_FILES.map((name) => `${base}/commercial/${name}.glb`)
-    const carFiles = ['sedan', 'hatchback-sports', 'suv', 'taxi', 'van'].map((name) => `${base}/cars/${name}.glb`)
+    const carFiles = CAR_APPEARANCES.map(({ model }) => `${base}/cars/${model}.glb`)
     const treeFiles = TREE_FILES.map((name) => `${base}/nature/${name}.glb`)
     const parkPropFiles = PARK_PROP_FILES.map((file) => `${base}/nature/${file}.glb`)
     const miniSkateFiles = MINI_SKATE_FILES.map((file) => `${base}/mini-skate/${file}.glb`)
@@ -295,11 +308,15 @@ export class City3DRenderer {
 
   private buildCity() {
     const { map } = this.engine
+    this.engravingTextures.forEach((texture) => texture.dispose())
+    this.engravingTextures.length = 0
+    this.carClippingPlanes[0].constant = this.carClippingPlanes[1].constant = map.width / 2
+    this.carClippingPlanes[2].constant = this.carClippingPlanes[3].constant = map.height / 2
     const asphalt = new THREE.MeshStandardMaterial({ color: PALETTE[12], roughness: 1, flatShading: true })
 
     // Vastag, látható makettalap: ettől lesz valódi dioráma, nem lebegő térkép.
     const pedestal = new THREE.Mesh(
-      new THREE.BoxGeometry(map.width + 3.2, 1.05, map.height + 3.2),
+      new THREE.BoxGeometry(map.width + 4.8, 1.05, map.height + 4.8),
       new THREE.MeshStandardMaterial({ color: '#5b4b3d', roughness: 0.94, flatShading: true }),
     )
     pedestal.position.y = -0.62
@@ -307,8 +324,22 @@ export class City3DRenderer {
     pedestal.receiveShadow = true
     this.staticGroup.add(pedestal)
 
+    // A gyep körül szabadon hagyott felső faperemre kerülnek az égtájak.
+    for (const { label, x, z } of [
+      { label: 'É', x: 0, z: -map.height / 2 - 1.87 },
+      { label: 'K', x: map.width / 2 + 1.87, z: 0 },
+      { label: 'D', x: 0, z: map.height / 2 + 1.87 },
+      { label: 'NY', x: -map.width / 2 - 1.87, z: 0 },
+    ]) {
+      const engraving = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9), this.engravedLabel(label))
+      engraving.rotation.x = -Math.PI / 2
+      engraving.position.set(x, -0.094, z)
+      engraving.receiveShadow = true
+      this.staticGroup.add(engraving)
+    }
+
     const lowerBase = new THREE.Mesh(
-      new THREE.BoxGeometry(map.width + 4.1, 0.22, map.height + 4.1),
+      new THREE.BoxGeometry(map.width + 5.7, 0.22, map.height + 5.7),
       new THREE.MeshStandardMaterial({ color: '#272521', roughness: 1, flatShading: true }),
     )
     lowerBase.position.y = -1.19
@@ -342,6 +373,30 @@ export class City3DRenderer {
     if (this.roadStraightModel && this.roadStraightHalfModel && this.roadCrossroadModel) this.addModelRoads()
     else this.addRoadMarkings()
     this.addTrafficLights()
+    this.seagulls.setBounds(map.width, map.height, new THREE.Box3().setFromObject(this.staticGroup).max.y)
+    this.seagulls.update((performance.now() - this.animationStartedAt) / 1000)
+  }
+
+  private engravedLabel(label: string) {
+    const canvas = document.createElement('canvas')
+    canvas.height = 128
+    canvas.width = 128
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.font = 'bold 70px Georgia, serif'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillStyle = '#62584d'
+    context.fillText(label, canvas.width / 2, canvas.height / 2 + 2)
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy()
+    this.engravingTextures.push(texture)
+    return new THREE.MeshStandardMaterial({
+      color: '#5b4b3d', roughness: 0.94, flatShading: true,
+      map: texture, bumpMap: texture, bumpScale: 0.045,
+    })
   }
 
   private addBlock(left: number, top: number, width: number, height: number, row: number, column: number) {
@@ -931,6 +986,16 @@ export class City3DRenderer {
       let model = this.carInstances.get(car)
       if (!model) {
         model = this.makeCar(car)
+        // A GLB és a tartalék modellek minden része, az árnyékuk is az úttest szélén végződik.
+        model.traverse((object) => {
+          if (!(object instanceof THREE.Mesh)) return
+          const materials = Array.isArray(object.material) ? object.material : [object.material]
+          materials.forEach((material) => {
+            material.clippingPlanes = this.carClippingPlanes
+            material.clipShadows = true
+            material.needsUpdate = true
+          })
+        })
         this.carInstances.set(car, model)
         this.carGroup.add(model)
       }
@@ -986,6 +1051,12 @@ export class City3DRenderer {
     this.renderer.render(this.scene, this.camera)
   }
 
+  private animateScenery = (now: number) => {
+    if (this.disposed) return
+    this.seagulls.update((now - this.animationStartedAt) / 1000)
+    this.draw()
+  }
+
   private clearGroup(group: THREE.Group, dispose: boolean) {
     while (group.children.length) {
       const child = group.children.pop()!
@@ -1004,6 +1075,8 @@ export class City3DRenderer {
     this.disposed = true
     this.resizeObserver.disconnect()
     this.renderer.setAnimationLoop(null)
+    this.seagulls.dispose()
+    this.engravingTextures.forEach((texture) => texture.dispose())
     this.controls.removeEventListener('change', this.draw)
     this.controls.dispose()
     this.clearGroup(this.staticGroup, true)

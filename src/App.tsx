@@ -28,7 +28,7 @@ export default function App() {
   const motion = useMemo(() => new LookaheadMotion(engine), [engine])
   const [stats, setStats] = useState(() => engine.stats())
   const [running, setRunning] = useState(false)
-  const [rate, setRate] = useState(8)
+  const [rate, setRate] = useState(3)
   const [primaryView, setPrimaryView] = useState<'3d' | 'radar'>('3d')
   const [message, setMessage] = useState(`KEZDŐ VÁROS: ${city.map.columns} × ${city.map.rows} KERESZTEZŐDÉS, ${city.program.declaredCount} AUTÓ.`)
   const [error, setError] = useState('')

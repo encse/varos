@@ -1,4 +1,5 @@
 import { CityEngine, PALETTE, type Car } from './engine'
+import { carColor } from './carAppearance'
 import { directionRotation, type AnimatedCarPose } from './motion'
 
 const crisp = (value: number) => Math.round(value) + 0.5
@@ -96,7 +97,7 @@ function drawCar(context: CanvasRenderingContext2D, car: Car, pose: AnimatedCarP
   context.translate(centerX, centerY)
   // A canvas Y tengelye lefelé nő, ezért a Three.js szögének előjele fordított.
   context.rotate(-pose.rotation)
-  context.fillStyle = PALETTE[car.color] ?? PALETTE[2]
+  context.fillStyle = carColor(car.color)
   context.fillRect(Math.round(x), Math.round(y), Math.ceil(width), Math.ceil(height))
 
   if (scale < 8) {
