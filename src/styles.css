@@ -111,7 +111,7 @@ footer { display: none; }
   .speed-control input { margin-top: 8px; }
   .progress-block { grid-column: 2; grid-row: 2; }
 }
-@media (max-width: 900px) {
+@media (max-width: 900px), (pointer: coarse) and (orientation: landscape) and (max-height: 900px) {
   .screen-titlebar > span { font-size: 9px; letter-spacing: 0; }
   .diorama-status { bottom: 16px; }
   .bottom-dock { padding: 0 8px 8px; gap: 4px; }
@@ -121,7 +121,7 @@ footer { display: none; }
   .run-button, .reset-button { min-width: 0; }
   .reset-button { width: 100%; }
 }
-@media (max-width: 650px) {
+@media (max-width: 650px), (pointer: coarse) and (orientation: landscape) and (max-height: 650px) {
   .masthead { top: 8px; left: 8px; width: min(400px, calc(100vw - 16px)); min-height: 58px; gap: 8px; padding: 6px 8px; }
   h1 { font-size: 23px; }
   .generate-button { min-height: 36px; padding: 6px 8px; font-size: 10px; }
@@ -147,6 +147,20 @@ footer { display: none; }
   .info-dialog-card > header { padding: 11px 12px; }
   .info-dialog h2 { font-size: 15px; }
   .info-dialog-copy { padding: 16px 14px 18px; font-size: 12px; line-height: 1.6; }
+}
+
+@media (pointer: coarse) and (orientation: landscape) and (max-height: 650px) {
+  .masthead { width: min(360px, calc(100vw - 232px)); min-height: 48px; gap: 8px; }
+  h1 { font-size: 20px; }
+  .generate-button { min-height: 32px; padding: 5px 8px; font-size: 9px; }
+  .screen-titlebar { top: 8px; left: calc(min(360px, 100vw - 232px) + 20px); right: 8px; height: 48px; }
+  .view-stage { --preview-width: 140px; --preview-height: 94px; }
+  .radar-view.is-primary .radar-surface { inset: 64px 8px 8px; }
+  .bottom-dock { padding-bottom: 6px; }
+  .control-deck { padding: 5px; }
+  .transport button { min-height: 42px; }
+  .run-button { padding: 5px 10px; }
+  .run-icon { font-size: 22px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
