@@ -1,0 +1,2 @@
+terkep.txt
+autok.txt

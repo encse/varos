@@ -1,0 +1,25 @@
+CCOPT=  -O6 -Wall
+INCDIR= -Ic:/djgpp/contrib/grx20/include
+GRXLIB= c:/djgpp/contrib/grx20/lib/libgrx20.a
+OBJS= car.o sor.o kereszt.o varos.o main.o
+p:      $(OBJS)
+	gxx -s -o varos.exe $(OBJS) $(GRXLIB) -lpc -lm
+.cpp.o:
+	gcc -c $(CCOPT) $(INCDIR) $*.cpp  -o $*.o
+	
+car.o: coord.h makefile
+car.o: car.h makefile
+sor.o: car.h makefile
+main.o: car.h makefile
+main.o: coord.h makefile
+main.o: sor.h makefile
+main.o: kereszt.h makefile
+kereszt.o: kereszt.h makefile
+kereszt.o: coord.h makefile
+kereszt.o: car.h makefile
+kereszt.o: sor.h makefile
+varos.o: kereszt.h makefile
+varos.o: sor.h makefile
+varos.o: coord.h makefile
+varos.o: car.h makefile
+varos.o: varos.h makefile

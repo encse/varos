@@ -1,0 +1,10 @@
+create.bat:
+  lefordítja az alábbi két állományt.
+genterk.cpp:
+  Véletlenszerű várost generál, a kereszteződések száma és az utcák
+  hosszai alapján (minden utca azonos hosszú lesz).
+  Kimeneti fájl: terkep.txt
+genauto.cpp:
+  A fenti program által előállított terkep.txt-hez generál adott számú
+  véletlenszerűen legyártott autót. 
+  Kimeneti fájl: autok.txt
